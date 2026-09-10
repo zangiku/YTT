@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+# ytt — YouTube in the terminal: search or browse your playlists, pick with fzf, play in mpv,
+# and add videos you find to your playlists.
+# Reading YouTube is delegated entirely to yt-dlp. Writing (`ytt add`) goes through the official
+# YouTube Data API via a small stdlib-only python3 helper at the bottom of this file.
+# Plain bash 3.2 so it runs under macOS /bin/bash, zsh users, and over SSH alike.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: ytt [-v] [-n N] <search terms>   search, pick (Tab = multi-select), play
+       ytt [-v] -p                      your playlists (+ Watch Later, Liked)
+       ytt [-v] <url> [url...]          play URLs directly (video, playlist, channel)
+       ytt [-v] -- -terms               search terms that start with '-'
+       ytt add [url...]                 add videos to one of your playlists
+                                        (no URLs given: paste them, then an empty line)
+       ytt login [browser[:profile]]    show / set where your YouTube login lives (for -p)
+       ytt auth [client_secret.json]    one-time YouTube API approval (for add)
+
+  -v     show video (default: audio only)
+  -n N   number of search results (default: 40)
+  -p     playlists: enter plays the whole list, → opens it to pick videos
+
+login: -p reads your browser's YouTube cookies fresh each run (nothing copied to disk),
+       e.g.  ytt login 'chrome:Profile 2'
+auth:  add uses the YouTube Data API — setup steps in the README. The approval token is
+       kept in ~/.config/ytt (mode 600).
+env:   YTT_MAX=200 caps every list · YTT_BROWSER overrides the saved login
+       YT_IPC="$TMPDIR/mpvsock" exposes mpv's IPC socket (keep it in a private dir)
+keys:  space pause · ←/→ 5s · ↑/↓ 60s · 9/0 volume · </> prev/next · q quit
+EOF
+}
+
+cfgdir="${XDG_CONFIG_HOME:-$HOME/.config}/ytt"
+conf="$cfgdir/browser"
+
+need() { command -v "$1" >/dev/null || { echo "ytt: $1 is not installed" >&2; exit 127; }; }
+
+# mpv hands the login source to yt-dlp inside a comma-separated option list, so a stray comma
+# (or quoting character) could smuggle in extra yt-dlp options such as --exec. Allow a safe set only.
+valid_login() {
+  case $1 in
+    *[!A-Za-z0-9\ :._+/~-]*)
+      echo "ytt: login source may only use letters, digits, space and : . _ + / ~ - ('$1')" >&2
+      exit 2 ;;
+  esac
+}
+
+fzf_opts=(--delimiter='\t' --with-nth=2.. --height=80% --reverse --cycle)
+
+# Run fzf; the choice lands in $sel. Exit quietly on its normal ways out (1 no match,
+# 130 Esc / Ctrl-C). 2 is a real error, most often no terminal because SSH was run without -t.
+pick() {
+  local rc=0
+  sel=$(fzf "${fzf_opts[@]}" "$@") || rc=$?
+  case $rc in
+    0) ;;
+    1 | 130) exit 0 ;;
+    *) echo "ytt: fzf failed (exit $rc) — over SSH, use ssh -t" >&2; exit "$rc" ;;
+  esac
+}
+
+# stdin: "id<TAB>duration<TAB>channel<TAB>title" lines → pick some → play them.
+pick_videos() {
+  local results id urls=()
+  results=$(awk -F'\t' -v OFS='\t' '$2 == "NA" { $2 = "LIVE" } 1')  # live streams have no duration
+  [ -n "$results" ] || { echo "ytt: nothing to show" >&2; exit 1; }
+  pick --multi --bind ctrl-a:select-all --prompt="$1 ▶  " \
+       --header='tab: select · ctrl-a: all · enter: play' <<<"$results"
+  while IFS=$'\t' read -r id _; do
+    urls+=("https://www.youtube.com/watch?v=$id")
+  done <<<"$sel"
+  exec mpv "${mpv_args[@]}" "${urls[@]}"
+}
+
+# YouTube Data API helper (python3, stdlib only); its source is $api_py at the end of the file.
+api() { python3 -c "$api_py" "$cfgdir" "$@"; }
+
+# The 11-character video ID from a YouTube URL — youtube.com (www/m/music) watch, shorts, live,
+# embed; youtube-nocookie.com embed; youtu.be — or a bare ID. Prints nothing for anything else,
+# including look-alike hosts and IDs with trailing characters.
+video_id() {
+  local u=$1 id='([A-Za-z0-9_-]{11})'
+  local host='^(https?://)?((www|m|music)\.)?(youtube\.com|youtube-nocookie\.com)/'
+  local watch="${host}watch\\?(.*&)?v=${id}([&#].*)?\$"
+  local path="${host}(shorts|live|embed)/${id}([/?#].*)?\$"
+  local short="^(https?://)?youtu\\.be/${id}([/?#].*)?\$"
+  local bare="^${id}\$"
+  if [[ $u =~ $watch ]] || [[ $u =~ $path ]]; then
+    echo "${BASH_REMATCH[6]}"
+  elif [[ $u =~ $short ]]; then
+    echo "${BASH_REMATCH[2]}"
+  elif [[ $u =~ $bare ]]; then
+    echo "${BASH_REMATCH[1]}"
+  fi
+}
+
+login() {
+  if [ $# -gt 0 ]; then
+    local src="$*" tmp   # tolerate an unquoted profile name: ytt login chrome:Profile 2
+    valid_login "$src"
+    ( umask 077; mkdir -p "$cfgdir" )
+    chmod 700 "$cfgdir"   # secure the directory before anything is written into it
+    # Private temp file (mktemp: mode 600) + rename: a planted symlink is replaced, never written through.
+    tmp=$(mktemp "$cfgdir/.tmp-XXXXXX")
+    printf '%s\n' "$src" >"$tmp"
+    [ ! -L "$conf" ] || rm -f "$conf"
+    mv -f "$tmp" "$conf"
+    echo "ytt: login source set to '$src' — test it with: ytt -p"
+  elif [ -s "$conf" ]; then
+    echo "ytt: login source is '$(cat "$conf")'"
+  else
+    echo "ytt: no login set — e.g. ytt login 'chrome:Profile 2'" >&2
+    exit 1
+  fi
+}
+
+add() {
+  need python3
+  need fzf
+  local raw="$*" line tok id ids=() lists
+  if [ -z "$raw" ]; then
+    echo "Paste YouTube URLs (one or more per line), then an empty line or Ctrl-D:" >&2
+    while IFS= read -r line; do
+      [ -n "$line" ] || break
+      raw="$raw $line"
+    done
+  fi
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    id=$(video_id "$tok")
+    if [ -z "$id" ]; then
+      echo "ytt: skipping '$tok' (not a YouTube video URL)" >&2
+      continue
+    fi
+    case " ${ids[*]:-} " in *" $id "*) ;; *) ids+=("$id") ;; esac
+  done <<<"$(printf '%s\n' "$raw" | tr -s ' \t' '\n\n')"
+  [ ${#ids[@]} -gt 0 ] || { echo "ytt: no video URLs to add" >&2; exit 1; }
+
+  lists=$(printf 'LL\tLiked videos\n'; api playlists) || exit 1
+  pick --prompt='add to ▶  ' \
+       --header="${#ids[@]} video(s) → pick a playlist · Watch Later can't be added to by apps" <<<"$lists"
+  api add "${sel%%$'\t'*}" "${ids[@]}"
+}
+
+main() {
+  case ${1:-} in
+    login) shift; login "$@"; exit ;;
+    auth) shift; need python3; api auth "$@"; exit ;;
+    add) shift; add "$@"; exit ;;
+  esac
+
+  video=0
+  n=40
+  mode=search
+  while getopts ':vpn:h' opt; do
+    case $opt in
+      v) video=1 ;;
+      p) mode=playlists ;;
+      n) n=$OPTARG ;;
+      h) usage; exit 0 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  [ "$mode" = playlists ] || [ $# -gt 0 ] || { usage >&2; exit 2; }
+
+  need yt-dlp
+  need mpv
+
+  # Point mpv at *this* yt-dlp, not a stale copy — the #1 cause of "it stopped playing".
+  mpv_args=("--script-opts=ytdl_hook-ytdl_path=$(command -v yt-dlp)")
+  [ "$video" = 1 ] || mpv_args+=(--no-video --ytdl-format=bestaudio/best)
+  [ -z "${YT_IPC:-}" ] || mpv_args+=("--input-ipc-server=$YT_IPC")
+
+  # Cap every list (playlists, Watch Later, channels): a 5,000-item list takes minutes to load.
+  max=${YTT_MAX:-200}
+  case $max in
+    '' | *[!0-9]* | 0*) echo "ytt: YTT_MAX needs a positive integer" >&2; exit 2 ;;
+  esac
+  mpv_args+=("--ytdl-raw-options-append=playlist-end=$max")
+
+  case ${1:-} in
+    # `--`: every later word is a file, so a pasted "--option" can't reach mpv (or yt-dlp's --exec).
+    http://* | https://*) exec mpv "${mpv_args[@]}" -- "$@" ;;
+  esac
+
+  need fzf
+  video_fmt='%(id)s	%(duration_string)s	%(channel)s	%(title)s'
+
+  if [ "$mode" = playlists ]; then
+    browser=${YTT_BROWSER:-}
+    [ -n "$browser" ] || { [ -s "$conf" ] && browser=$(cat "$conf"); } || true
+    [ -n "$browser" ] || { echo "ytt: -p needs your login first — e.g. ytt login 'chrome:Profile 2'" >&2; exit 1; }
+    valid_login "$browser"   # also covers YTT_BROWSER and a hand-edited config file
+    cookies=(--cookies-from-browser "$browser")
+    mpv_args+=("--ytdl-raw-options-append=cookies-from-browser=$browser")
+
+    mine=$(yt-dlp "${cookies[@]}" --flat-playlist --no-warnings --print '%(id)s	%(title)s' \
+             https://www.youtube.com/feed/playlists) \
+      || { echo "ytt: couldn't read your playlists — logged in to YouTube in '$browser'?" >&2; exit 1; }
+    # The feed already contains WL/LL somewhere in the middle; pin them to the top, once.
+    lists=$(printf 'WL\tWatch Later\nLL\tLiked videos\n'
+            [ -z "$mine" ] || printf '%s\n' "$mine" | awk -F'\t' '$1 != "WL" && $1 != "LL"')
+
+    pick --expect=right --prompt='playlists ▶  ' \
+         --header='enter: play all · →: pick videos' <<<"$lists"
+    key=$(sed -n 1p <<<"$sel")
+    line=$(sed -n 2p <<<"$sel")
+    id=${line%%$'\t'*}
+    title=${line#*$'\t'}
+    [ -n "$id" ] || exit 0
+    case $id in
+      # A Mix (RD + seed video id) only resolves when opened from its seed video.
+      RD*) url="https://www.youtube.com/watch?v=${id#RD}&list=$id" ;;
+      *) url="https://www.youtube.com/playlist?list=$id" ;;
+    esac
+
+    if [ "$key" = right ]; then
+      # Not a pipeline: pick_videos must run in this shell so its exit / exec end the script.
+      entries=$(yt-dlp "${cookies[@]}" --flat-playlist --no-warnings --playlist-end "$max" \
+                  --print "$video_fmt" "$url") \
+        || { echo "ytt: couldn't read '$title'" >&2; exit 1; }
+      pick_videos "$title" <<<"$entries"
+    fi
+    exec mpv "${mpv_args[@]}" "$url"
+  fi
+
+  case $n in
+    '' | *[!0-9]* | 0*) echo "ytt: -n needs a positive integer" >&2; exit 2 ;;
+  esac
+
+  # --flat-playlist is essential: without it yt-dlp resolves every result (minutes, not ~1s).
+  results=$(yt-dlp "ytsearch$n:$*" --flat-playlist --no-warnings --print "$video_fmt") \
+    || { echo "ytt: search failed (try: brew upgrade yt-dlp)" >&2; exit 1; }
+  [ -n "$results" ] || { echo "ytt: no results" >&2; exit 1; }
+  pick_videos search <<<"$results"
+}
+
+# ---------------------------------------------------------------------------------------------
+# YouTube Data API helper. argv: <config dir> <auth [client.json] | playlists | add LIST ID...>
+# OAuth for installed apps: loopback redirect + PKCE, scope youtube. Client + token files are
+# written mode 600 into the config dir. Credentials only ever go to Google's fixed endpoints
+# (tests may point them at a loopback server with YTT_TEST_BASE=http://127.0.0.1:<port>).
+IFS= read -r -d '' api_py <<'PY' || true
+import base64, contextlib, hashlib, http.server, json, os, re, secrets, sys, tempfile, threading, time
+import urllib.error, urllib.parse, urllib.request, webbrowser
+
+cfg, cmd, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+CLIENT, TOKEN = os.path.join(cfg, "client.json"), os.path.join(cfg, "token.json")
+SCOPE = "https://www.googleapis.com/auth/youtube"
+AGAIN = "run: ytt auth"
+# Fixed on purpose: auth_uri / token_uri in the client file are ignored, so a doctored client file
+# or environment can't route the auth code, refresh token or access token anywhere else.
+AUTH_URI, TOKEN_URI = "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token"
+API = "https://www.googleapis.com/youtube/v3"
+_test = os.environ.get("YTT_TEST_BASE", "")
+if _test:
+    if not re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}", _test):
+        print("ytt: YTT_TEST_BASE must be http://127.0.0.1:<port>", file=sys.stderr)
+        sys.exit(1)
+    AUTH_URI, TOKEN_URI, API = _test + "/auth", _test + "/token", _test
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_):  # never follow: urllib would re-send Authorization cross-origin
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+class ApiError(Exception):
+    def __init__(self, code, err):
+        e = err.get("error")
+        if isinstance(e, dict):  # YouTube API error
+            reason, msg = ((e.get("errors") or [{}])[0]).get("reason", ""), e.get("message", "")
+        else:  # OAuth token endpoint error
+            reason, msg = e or "", err.get("error_description", "")
+        self.code, self.reason = code, reason
+        super().__init__(f"HTTP {code} {reason}: {msg}".strip(" :"))
+
+
+def die(msg):
+    print("ytt: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def save(path, obj):
+    os.makedirs(cfg, mode=0o700, exist_ok=True)
+    os.chmod(cfg, 0o700)  # `ytt login` may have created it under a looser umask
+    # Private temp file (mkstemp: O_EXCL, mode 600), fsync, then rename over the target: readers
+    # never see a half-written token, a crash can't destroy the old one, and a symlink at `path`
+    # is replaced rather than written through.
+    fd, tmp = tempfile.mkstemp(dir=cfg, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
+def call(req):
+    try:
+        with OPENER.open(req, timeout=30) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read() or b"{}")
+        except ValueError:
+            err = {}
+        raise ApiError(e.code, err if isinstance(err, dict) else {})
+    return json.loads(body) if body else {}
+
+
+def form(url, data):
+    return call(urllib.request.Request(url, urllib.parse.urlencode(data).encode()))
+
+
+def client():
+    try:
+        with open(CLIENT) as f:
+            c = json.load(f)["installed"]
+        if not c.get("client_id"):
+            raise KeyError("client_id")
+        return c
+    except FileNotFoundError:
+        die("no API client yet — run: ytt auth ~/Downloads/client_secret_....json")
+    except OSError as e:
+        die(f"can't read {CLIENT} ({e.strerror}) — run: ytt auth <client_secret.json>")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        die(f"{CLIENT} isn't a Desktop-app OAuth client — run: ytt auth <client_secret.json>")
+
+
+def load_token():
+    try:
+        with open(TOKEN) as f:
+            t = json.load(f)
+    except FileNotFoundError:
+        die("not approved yet — run: ytt auth <client_secret.json>")
+    except (OSError, ValueError) as e:
+        die(f"{TOKEN} is unreadable ({getattr(e, 'strerror', None) or 'not JSON'}) — {AGAIN}")
+    if not isinstance(t, dict) or not isinstance(t.get("refresh_token"), str) or not t["refresh_token"]:
+        die(f"{TOKEN} has no refresh token — {AGAIN}")
+    exp = t.get("expires_at", 0)
+    if not isinstance(t.get("access_token", ""), str) or isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        die(f"{TOKEN} is malformed — {AGAIN}")
+    return t
+
+
+def token(force=False):
+    t = load_token()
+    if not force and t.get("access_token") and t.get("expires_at", 0) > time.time() + 60:
+        return t["access_token"]
+    c = client()
+    try:
+        r = form(TOKEN_URI, {"client_id": c["client_id"], "client_secret": c.get("client_secret", ""),
+                             "refresh_token": t["refresh_token"], "grant_type": "refresh_token"})
+    except ApiError as e:
+        die(f"approval expired or revoked ({e}) — {AGAIN}")
+    if not r.get("access_token"):
+        die(f"Google returned no access token — {AGAIN}")
+    t.update(access_token=r["access_token"], expires_at=time.time() + r.get("expires_in", 3600))
+    save(TOKEN, t)
+    return t["access_token"]
+
+
+def api(method, path, params, body=None):
+    url = f"{API}/{path}?{urllib.parse.urlencode(params)}"
+    data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
+    for retry in (False, True):  # a 401 despite an unexpired token: refresh once, then give up
+        headers = {"Authorization": "Bearer " + token(force=retry), "Content-Type": "application/json"}
+        try:
+            return call(urllib.request.Request(url, data=data, method=method, headers=headers))
+        except ApiError as e:
+            if e.code != 401:
+                raise
+            if retry:
+                die(f"YouTube rejected the approval (HTTP 401) — {AGAIN}")
+
+
+def auth(path=None):
+    if path:
+        try:
+            with open(os.path.expanduser(path)) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            die(f"can't read {path}: {e}")
+        if not isinstance(raw, dict) or "installed" not in raw:
+            die("that isn't a Desktop-app OAuth client (Application type must be 'Desktop app')")
+        save(CLIENT, raw)
+    c = client()
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state, got = secrets.token_urlsafe(16), {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = 5  # an idle connection (preconnect, stray local client) must not stall the flow
+
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            q = dict(urllib.parse.parse_qsl(u.query))
+            # Only Google's redirect counts: our path and Host, our state, exactly one of code/error.
+            ok = (u.path == "/callback" and self.headers.get("Host") == host
+                  and q.get("state") == state and ("code" in q) != ("error" in q))
+            if ok:
+                got.update(q)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(("ytt: done — you can close this tab." if ok else "ytt: unexpected request").encode())
+
+        def log_message(self, *_):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    srv.timeout = 1
+    srv.handle_error = lambda *_: None  # a timed-out stray connection isn't worth a traceback
+    host = f"127.0.0.1:{srv.server_port}"
+    redirect = f"http://{host}/callback"
+    url = AUTH_URI + "?" + urllib.parse.urlencode({
+        "client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code", "scope": SCOPE,
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
+        "access_type": "offline", "prompt": "consent"})
+    print("ytt: approve YouTube access in your browser. If it didn't open:\n  " + url, file=sys.stderr)
+    deadline = time.monotonic() + 300
+    # In a thread: a blocking $BROWSER (e.g. a text browser) can't hold up the deadline.
+    threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+    while not got and time.monotonic() < deadline:
+        srv.handle_request()
+    srv.server_close()
+    if "code" not in got:
+        die("no approval received" + (f" ({got['error']})" if "error" in got else " within 5 minutes"))
+    r = form(TOKEN_URI, {"code": got["code"], "client_id": c["client_id"],
+                         "client_secret": c.get("client_secret", ""), "redirect_uri": redirect,
+                         "grant_type": "authorization_code", "code_verifier": verifier})
+    if not r.get("refresh_token") or not r.get("access_token"):
+        die("Google returned no refresh token — remove ytt at myaccount.google.com/permissions, then retry")
+    save(TOKEN, {"access_token": r["access_token"], "refresh_token": r["refresh_token"],
+                 "expires_at": time.time() + r.get("expires_in", 3600)})
+    print("ytt: approved — try: ytt add <url>", file=sys.stderr)
+
+
+def clean(s):
+    return " ".join(s.split())  # tabs/newlines in a title would break the fzf columns
+
+
+def playlists():
+    params = {"part": "snippet", "mine": "true", "maxResults": 50}
+    while True:
+        r = api("GET", "playlists", params)
+        for p in r.get("items", []):
+            print(f"{p['id']}\t{clean(p['snippet']['title'])}")
+        if not r.get("nextPageToken"):
+            return
+        params["pageToken"] = r["nextPageToken"]
+
+
+def add(playlist, videos):
+    failed = 0
+    for v in videos:
+        try:
+            if playlist == "LL":  # "Liked videos" isn't writable as a playlist; liking adds to it
+                api("POST", "videos/rate", {"id": v, "rating": "like"})
+                print(f"liked  {v}")
+                continue
+            if api("GET", "playlistItems", {"part": "id", "playlistId": playlist, "videoId": v}).get("items"):
+                print(f"already there  {v}")
+                continue
+            r = api("POST", "playlistItems", {"part": "snippet"},
+                    {"snippet": {"playlistId": playlist, "resourceId": {"kind": "youtube#video", "videoId": v}}})
+            print(f"added  {v}  {clean(r.get('snippet', {}).get('title', ''))}")
+        except ApiError as e:
+            if e.reason in ("quotaExceeded", "dailyLimitExceeded"):
+                die("daily YouTube API quota used up (about 200 adds/day) — try again tomorrow")
+            failed += 1
+            print(f"ytt: {v}: {e}", file=sys.stderr)
+    sys.exit(1 if failed else 0)
+
+
+try:
+    {"auth": lambda: auth(*args[:1]), "playlists": playlists, "add": lambda: add(args[0], args[1:])}[cmd]()
+except ApiError as e:
+    die(str(e))
+except urllib.error.URLError as e:
+    die(f"network error: {e.reason}")
+PY
+
+main "$@"

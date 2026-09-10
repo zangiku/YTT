@@ -1,0 +1,8 @@
+# Local-only notes for the maintainer's Claude sessions (machine names, accounts) — never public.
+CLAUDE.md
+.DS_Store
+# Never commit credentials: ytt keeps these in ~/.config/ytt, but guard against stray copies.
+client_secret*.json
+client.json
+token.json
+cookies*.txt
