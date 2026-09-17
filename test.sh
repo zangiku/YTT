@@ -281,6 +281,26 @@ grep -q '/steal' "$S/api.log" && bad "api: followed a redirect with the token" |
 check "api: test base must be loopback" 1 "must be http://127.0.0.1" -- env PATH="$S/real:$PATH" YTT_TEST_BASE=https://evil.example "$Y" add dQw4w9WgXcQ
 grep -q 'evil.example' "$S/api.log" "$S/authparams.json" && bad "api: client-file endpoint used" || ok "api: client-file endpoints ignored"
 
+# --- TLS: the helper must verify certificates even on a Python with an empty trust store
+if python3 - "$Y" <<'TLSPY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"IFS= read -r -d '' api_py <<'PY' \|\| true\n(.*?)\nPY\n", src, re.S)
+assert m, "api_py block not found in ytt"
+g = {}
+sys.argv = ["-c", "/tmp", "nosuchcmd"]
+try:
+    exec(compile(m.group(1), "api_py", "exec"), g)
+except KeyError:
+    pass
+ctx = g["ssl_context"]()
+n = ctx.cert_store_stats()["x509_ca"]
+assert ctx.verify_mode.name == "CERT_REQUIRED", "verification disabled"
+assert ctx.check_hostname, "hostname check disabled"
+sys.exit(0 if n > 0 else 1)
+TLSPY
+then ok "tls: ssl_context loads CAs, verify + hostname check on"; else bad "tls: ssl_context has no CA bundle"; fi
+
 # --- opt-in: real searches against YouTube (needs yt-dlp + network)
 if [ "${YTT_LIVE_TESTS:-}" = 1 ]; then
   real() { env PATH="$S/real:/opt/homebrew/bin:$PATH" "$@"; }

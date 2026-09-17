@@ -243,7 +243,7 @@ main() {
 # written mode 600 into the config dir. Credentials only ever go to Google's fixed endpoints
 # (tests may point them at a loopback server with YTT_TEST_BASE=http://127.0.0.1:<port>).
 IFS= read -r -d '' api_py <<'PY' || true
-import base64, contextlib, hashlib, http.server, json, os, re, secrets, sys, tempfile, threading, time
+import base64, contextlib, hashlib, http.server, json, os, re, secrets, ssl, sys, tempfile, threading, time
 import urllib.error, urllib.parse, urllib.request, webbrowser
 
 cfg, cmd, args = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -267,7 +267,27 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-OPENER = urllib.request.build_opener(NoRedirect)
+def ssl_context():
+    # A python.org build whose "Install Certificates.command" was never run verifies nothing and
+    # every HTTPS call dies with CERTIFICATE_VERIFY_FAILED. Fall back to a real CA bundle;
+    # never fall back to skipping verification.
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats()["x509_ca"]:
+        return ctx
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+        return ctx
+    except Exception:
+        pass
+    for bundle in ("/etc/ssl/cert.pem", "/usr/local/etc/openssl/cert.pem", "/opt/homebrew/etc/ca-certificates/cert.pem"):
+        if os.path.exists(bundle):
+            ctx.load_verify_locations(bundle)
+            return ctx
+    die("no CA certificates found — run Python's 'Install Certificates.command', or: pip3 install certifi")
+
+
+OPENER = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl_context()))
 
 
 class ApiError(Exception):
