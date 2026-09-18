@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ytt — Privacy Policy</title>
+  <meta name="description" content="Privacy policy for ytt, a command-line YouTube client." />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta name="theme-color" content="#2B2824" />
+  <style>
+    :root { --bg:#2B2824; --fg:#ECE3D0; --muted:#A89B82; --accent:#C98A5E; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font-family: "SF Mono","JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+      -webkit-font-smoothing: antialiased; min-height:100vh;
+      display:flex; align-items:flex-start; justify-content:flex-start; padding:2.5rem 3rem;
+    }
+    main { max-width: 640px; }
+    a.home { color: var(--muted); text-decoration:none; font-size:0.8rem; letter-spacing:1px; }
+    a.home:hover { color: var(--accent); }
+    h1 { font-size:1.5rem; font-weight:500; letter-spacing:1px; margin:26px 0 6px; }
+    .updated { color: var(--muted); font-size:0.8rem; margin:0 0 32px; }
+    h2 { font-size:0.95rem; font-weight:500; letter-spacing:1px; margin:32px 0 12px; color: var(--accent); }
+    p, li { font-size:0.9rem; line-height:1.75; }
+    ul { padding-left: 1.1rem; margin:0; }
+    li { margin-bottom: 10px; }
+    code { background: rgba(0,0,0,0.25); padding: 1px 5px; }
+    a { color: var(--fg); }
+    a:hover { color: var(--accent); }
+    footer { margin-top:56px; color:var(--muted); font-size:0.78rem; opacity:0.7; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="home" href="/">&larr; YTT</a>
+    <h1>Privacy Policy for ytt</h1>
+    <p class="updated">Last updated: 2026-09-17</p>
+
+    <p>
+      ytt is a command-line program that runs entirely on your own computer. It is not a hosted
+      service. There is no ytt server, and the author receives no data from it.
+    </p>
+
+    <h2>WHAT YTT ACCESSES</h2>
+    <ul>
+      <li>
+        <strong>YouTube, through Google's API.</strong> If you run <code>ytt auth</code>, you approve
+        ytt to read and modify <em>your own</em> YouTube playlists. ytt uses this only to list your
+        playlists and to add videos that you choose.
+      </li>
+      <li>
+        <strong>Your browser's YouTube cookies.</strong> If you run <code>ytt -p</code>, ytt asks
+        yt-dlp to read the YouTube cookies of the browser profile you name, so YouTube shows your own
+        playlists. The cookies are read at that moment and sent only to YouTube.
+      </li>
+    </ul>
+
+    <h2>WHAT YTT STORES</h2>
+    <ul>
+      <li>Your Google approval (an OAuth client file and a token) in <code>~/.config/ytt/</code>,
+        readable only by your user account (mode 600).</li>
+      <li>The name of the browser profile to read cookies from, in the same directory.</li>
+    </ul>
+    <p>
+      Nothing else is stored. ytt writes no cookie files, keeps no history of what you play, search
+      for, or add, and contains no analytics or telemetry.
+    </p>
+
+    <h2>WHAT YTT SENDS, AND WHERE</h2>
+    <p>
+      Requests go to Google and YouTube only — <code>accounts.google.com</code>,
+      <code>oauth2.googleapis.com</code>, <code>www.googleapis.com</code>, and YouTube itself. The
+      endpoints are fixed in the source code, and ytt does not follow redirects for requests that
+      carry your credentials. Nothing is sent to the author or to any third party.
+    </p>
+
+    <h2>REMOVING YOUR DATA</h2>
+    <ul>
+      <li>Withdraw ytt's access at
+        <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a></li>
+      <li>Delete the stored files: <code>rm -rf ~/.config/ytt</code></li>
+    </ul>
+    <p>Removing the program removes everything it kept; there is nothing held elsewhere to delete.</p>
+
+    <h2>REQUIRED DISCLOSURES</h2>
+    <p>
+      ytt's use of information received from Google APIs adheres to the
+      <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services
+      User Data Policy</a>, including the Limited Use requirements.
+    </p>
+    <p>
+      ytt uses YouTube API Services. By using ytt you also agree to the
+      <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> and the
+      <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.
+    </p>
+
+    <h2>CONTACT</h2>
+    <p>Questions or problems: <a href="https://github.com/zangiku/YTT/issues">github.com/zangiku/YTT/issues</a></p>
+
+    <footer>&copy; 2026 Proteus Ventures, Inc.</footer>
+  </main>
+</body>
+</html>

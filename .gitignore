@@ -6,3 +6,4 @@ client_secret*.json
 client.json
 token.json
 cookies*.txt
+.firebase/

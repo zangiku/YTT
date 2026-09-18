@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ytt — YouTube in the terminal</title>
+  <meta name="description" content="ytt — search YouTube, browse your playlists, and add videos, from the terminal." />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta property="og:title" content="ytt — YouTube in the terminal" />
+  <meta property="og:description" content="Search YouTube, browse your playlists, and add videos, from the terminal." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://ytt.proteus.vc" />
+  <meta name="theme-color" content="#2B2824" />
+  <style>
+    :root { --bg:#2B2824; --fg:#ECE3D0; --muted:#A89B82; --accent:#C98A5E; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font-family: "SF Mono","JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+      -webkit-font-smoothing: antialiased; min-height:100vh;
+      display:flex; align-items:flex-start; justify-content:flex-start; padding:2.5rem 3rem;
+    }
+    main { max-width: 620px; }
+    a.home { color: var(--muted); text-decoration:none; font-size:0.8rem; letter-spacing:1px; }
+    a.home:hover { color: var(--accent); }
+    h1 { font-size:1.6rem; font-weight:500; letter-spacing:1px; margin:26px 0 0; }
+    .tagline { color: var(--muted); font-size:0.95rem; margin:14px 0 32px; line-height:1.7; }
+    h2 { font-size:0.95rem; font-weight:500; letter-spacing:1px; margin:32px 0 12px; color: var(--accent); }
+    p, li { font-size:0.9rem; line-height:1.75; color: var(--fg); }
+    ul { padding-left: 1.1rem; margin: 0; }
+    li { margin-bottom: 8px; }
+    pre {
+      background: rgba(0,0,0,0.25); border-left: 2px solid var(--accent);
+      padding: 14px 16px; overflow-x: auto; font-size: 0.82rem; line-height:1.6;
+    }
+    code { color: var(--fg); }
+    a { color: var(--fg); }
+    a:hover { color: var(--accent); }
+    footer { margin-top:56px; color:var(--muted); font-size:0.78rem; opacity:0.7; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="home" href="https://proteus.vc">&larr; PROTEUS VENTURES</a>
+    <h1>ytt</h1>
+    <p class="tagline">YouTube in the terminal. No browser, no ads, no page render — audio by default.</p>
+
+    <h2>WHAT IT DOES</h2>
+    <ul>
+      <li>Search YouTube and pick results in a fuzzy finder, then play them in mpv.</li>
+      <li>Browse your own playlists by title, including Watch Later and Liked videos.</li>
+      <li>Add videos you find to your own playlists.</li>
+      <li>Play any URL, playlist, or channel directly.</li>
+    </ul>
+
+    <h2>INSTALL</h2>
+    <pre><code>brew install yt-dlp fzf mpv
+git clone https://github.com/zangiku/YTT
+ln -sf "$PWD/YTT/ytt" ~/.local/bin/ytt</code></pre>
+    <p>Source, documentation and setup: <a href="https://github.com/zangiku/YTT">github.com/zangiku/YTT</a></p>
+
+    <h2>YOUR DATA</h2>
+    <p>
+      ytt runs entirely on your own computer. It is not a hosted service, and no data reaches
+      Proteus Ventures. Adding videos uses the official YouTube Data API, and only after you
+      approve it. See the <a href="/privacy">privacy policy</a>.
+    </p>
+
+    <footer>&copy; 2026 Proteus Ventures, Inc.</footer>
+  </main>
+</body>
+</html>
